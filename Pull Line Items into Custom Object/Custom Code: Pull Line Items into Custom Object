@@ -1,49 +1,68 @@
 const axios = require('axios');
 
-exports.main = async (event) => {
+exports.main = async (event, callback) => {
     const hubspot = axios.create({
         baseURL: 'https://api.hubapi.com',
         headers: { 'Authorization': `Bearer ${process.env.hubspot_oauth}` }
     });
 
+    let outputText = "No line items found.";
+    let formattedText = "No line items found.";
+
     try {
         const dealId = event.inputFields.dealId;
-        const financeTaskId = event.inputFields.financeTaskId;
 
         // Step 1: Get associated Line Items
         const lineItemsResponse = await hubspot.get(`/crm/v3/objects/deals/${dealId}/associations/line_items`);
         const lineItemIds = lineItemsResponse.data.results.map(item => item.id);
 
-        if (lineItemIds.length === 0) {
-            throw new Error('No line items found for this deal.');
-        }
+        if (lineItemIds.length > 0) {
+            // Step 2: Retrieve details for each Line Item
+            const lineItemDetails = await Promise.all(lineItemIds.map(async (id) => {
+                const response = await hubspot.get(`/crm/v3/objects/line_items/${id}`);
+                const data = response.data.properties;
 
-        // Step 2: Retrieve details for each Line Item
-        const lineItemDetails = await Promise.all(lineItemIds.map(async (id) => {
-            const response = await hubspot.get(`/crm/v3/objects/line_items/${id}`);
-            const data = response.data.properties;
-            return `- ${data.name} (SKU: ${data.hs_sku}, Qty: ${data.quantity}, Price: $${data.price})`;
-        }));
+                // Fetch the associated product details
+                let productName = 'Unknown Item';
+                let productSku = 'N/A';
+                let productPrice = '0';
 
-        // Step 3: Create a formatted note
-        const noteContent = `**Line Items for Deal ${dealId}:**\n` + lineItemDetails.join('\n');
+                if (data.hs_product_id) {
+                    const productResponse = await hubspot.get(`/crm/v3/objects/products/${data.hs_product_id}`);
+                    const productData = productResponse.data.properties;
 
-        // Step 4: Create a note in the finance task record
-        await hubspot.post('/crm/v3/objects/notes', {
-            properties: {
-                hs_note_body: noteContent
-            },
-            associations: [
-                {
-                    to: { id: financeTaskId },
-                    types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 215 }] // Association ID for Custom Objects
+                    productName = productData.name || 'Unknown Item';
+                    productSku = productData.hs_sku || 'N/A';
+                    productPrice = productData.price || '0';
                 }
-            ]
-        });
 
-        return { outputFields: { success: true } };
+                return {
+                    productName: productName,
+                    productSku: productSku,
+                    quantity: data.quantity || '0',
+                    productPrice: productPrice
+                };
+            }));
+
+            // Step 3: Format raw and formatted output
+            outputText = `**Line Items for Deal ${dealId}:**\n` + 
+                lineItemDetails.map(item => `- ${item.productName} (SKU: ${item.productSku}, Qty: ${item.quantity}, Price: $${item.productPrice})`).join('\n');
+
+            formattedText = `**Line Items for Deal ${dealId}:**\n` + 
+                lineItemDetails.map((item, index) => `${index + 1}. ${item.productName} (SKU: ${item.productSku}, Qty: ${item.quantity}, Price: $${item.productPrice})`).join('\n');
+        }
     } catch (error) {
         console.error('Error:', error.response?.data || error.message);
-        return { outputFields: { success: false, error: error.message } };
+        outputText = `Error: ${error.message}`;
+        formattedText = `Error: ${error.message}`;
     }
+
+    // Step 4: Return Output Using Callback
+    callback({
+        outputFields: {
+            rawLineItemText: outputText,  // Raw text output
+            formattedLineItemText: formattedText,  // Formatted output with numbering
+            debugOutput: "Test Output"  // Additional debugging output
+        }
+    });
 };
