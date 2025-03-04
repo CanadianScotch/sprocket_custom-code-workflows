@@ -1,0 +1,49 @@
+const axios = require('axios');
+
+exports.main = async (event) => {
+    const hubspot = axios.create({
+        baseURL: 'https://api.hubapi.com',
+        headers: { 'Authorization': `Bearer ${process.env.hubspot_oauth}` }
+    });
+
+    try {
+        const dealId = event.inputFields.dealId;
+        const financeTaskId = event.inputFields.financeTaskId;
+
+        // Step 1: Get associated Line Items
+        const lineItemsResponse = await hubspot.get(`/crm/v3/objects/deals/${dealId}/associations/line_items`);
+        const lineItemIds = lineItemsResponse.data.results.map(item => item.id);
+
+        if (lineItemIds.length === 0) {
+            throw new Error('No line items found for this deal.');
+        }
+
+        // Step 2: Retrieve details for each Line Item
+        const lineItemDetails = await Promise.all(lineItemIds.map(async (id) => {
+            const response = await hubspot.get(`/crm/v3/objects/line_items/${id}`);
+            const data = response.data.properties;
+            return `- ${data.name} (SKU: ${data.hs_sku}, Qty: ${data.quantity}, Price: $${data.price})`;
+        }));
+
+        // Step 3: Create a formatted note
+        const noteContent = `**Line Items for Deal ${dealId}:**\n` + lineItemDetails.join('\n');
+
+        // Step 4: Create a note in the finance task record
+        await hubspot.post('/crm/v3/objects/notes', {
+            properties: {
+                hs_note_body: noteContent
+            },
+            associations: [
+                {
+                    to: { id: financeTaskId },
+                    types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 215 }] // Association ID for Custom Objects
+                }
+            ]
+        });
+
+        return { outputFields: { success: true } };
+    } catch (error) {
+        console.error('Error:', error.response?.data || error.message);
+        return { outputFields: { success: false, error: error.message } };
+    }
+};
