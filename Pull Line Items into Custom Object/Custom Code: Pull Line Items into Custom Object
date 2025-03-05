@@ -6,63 +6,97 @@ exports.main = async (event, callback) => {
         headers: { 'Authorization': `Bearer ${process.env.hubspot_oauth}` }
     });
 
-    let outputText = "No line items found.";
-    let formattedText = "No line items found.";
+    let outputFields = {};
 
     try {
+        // Get dealId directly from the event object
         const dealId = event.inputFields.dealId;
+        console.log("Deal ID from inputFields.dealId:", dealId);
 
         // Step 1: Get associated Line Items
         const lineItemsResponse = await hubspot.get(`/crm/v3/objects/deals/${dealId}/associations/line_items`);
         const lineItemIds = lineItemsResponse.data.results.map(item => item.id);
+        console.log("Line Item IDs associated with Deal:", lineItemIds);
 
         if (lineItemIds.length > 0) {
             // Step 2: Retrieve details for each Line Item
             const lineItemDetails = await Promise.all(lineItemIds.map(async (id) => {
-                const response = await hubspot.get(`/crm/v3/objects/line_items/${id}`);
-                const data = response.data.properties;
+                try {
+                    // **Modified Line Item GET request to include properties parameter:**
+                    const response = await hubspot.get(`/crm/v3/objects/line_items/${id}?properties=name,hs_sku,amount,quantity,hs_total_discount,hs_discount_percentage,hs_product_id`);
+                    console.log(`Line Item API Response for ID ${id}:`, response);
+                    const data = response.data.properties;
+                    console.log('Line Item Data (properties):', data);
 
-                // Fetch the associated product details
-                let productName = 'Unknown Item';
-                let productSku = 'N/A';
-                let productPrice = '0';
+                    // Initialize values from the line item
+                    let productName = data.name || 'Unknown Item';
+                    let productSku = data.hs_sku || 'N/A';
+                    let productAmount = data.amount || '0';
+                    let totalDiscount = data.hs_total_discount || '0';
+                    let discountPercentage = data.hs_discount_percentage || '0';
 
-                if (data.hs_product_id) {
-                    const productResponse = await hubspot.get(`/crm/v3/objects/products/${data.hs_product_id}`);
-                    const productData = productResponse.data.properties;
+                    // Step 3: If data is missing from the line item, attempt to fetch from associated product
+                    if (productSku === 'N/A' || productAmount === '0') {
+                        if (data.hs_product_id) {
+                            try {
+                                const productResponse = await hubspot.get(`/crm/v3/objects/products/${data.hs_product_id}`);
+                                const productData = productResponse.data.properties;
+                                console.log(`Product Data (properties) for Product ID ${data.hs_product_id}:`, productData);
 
-                    productName = productData.name || 'Unknown Item';
-                    productSku = productData.hs_sku || 'N/A';
-                    productPrice = productData.price || '0';
+                                // Update values from the product if missing on the line item
+                                if (!productName || productName === 'Unknown Item') {
+                                    productName = productData.name || 'Unknown Item';
+                                }
+                                if (productSku === 'N/A') {
+                                    productSku = productData.hs_sku || 'N/A';
+                                }
+                                if (productAmount === '0') {
+                                    productAmount = productData.amount || '0';
+                                }
+                            } catch (productError) {
+                                console.error('Error fetching product details:', productError.message);
+                            }
+                        }
+                    }
+
+                    // Return the formatted string for this line item
+                    return {
+                        productName: productName,
+                        productSku: productSku,
+                        quantity: data.quantity || '0',
+                        productAmount: productAmount,
+                        totalDiscount: totalDiscount,
+                        discountPercentage: discountPercentage
+                    };
+
+                } catch (lineItemFetchError) {
+                    console.error(`Error fetching Line Item ID ${id}:`, lineItemFetchError.message);
+                    return {
+                        productName: 'Error Fetching Item',
+                        productSku: 'Error',
+                        quantity: '0',
+                        productAmount: '0',
+                        totalDiscount: '0',
+                        discountPercentage: '0'
+                    };
                 }
-
-                return {
-                    productName: productName,
-                    productSku: productSku,
-                    quantity: data.quantity || '0',
-                    productPrice: productPrice
-                };
             }));
 
-            // Step 3: Format raw and formatted output
-            outputText = `**Line Items for Deal ${dealId}:**\n` + 
-                lineItemDetails.map(item => `- ${item.productName} (SKU: ${item.productSku}, Qty: ${item.quantity}, Price: $${item.productPrice})`).join('\n');
-
-            formattedText = `**Line Items for Deal ${dealId}:**\n` + 
-                lineItemDetails.map((item, index) => `${index + 1}. ${item.productName} (SKU: ${item.productSku}, Qty: ${item.quantity}, Price: $${item.productPrice})`).join('\n');
+            // Step 4: Output each line item to a different output field
+            lineItemDetails.forEach((item, index) => {
+                outputFields[`lineItem${index + 1}`] = `${item.productName} (SKU: ${item.productSku}, Qty: ${item.quantity}, Amount: $${item.productAmount}, Discount: $${item.totalDiscount}, Discount Percentage: ${item.discountPercentage}%)`;
+            });
+        } else {
+            console.log("No Line Items associated with Deal ID:", dealId);
         }
+
     } catch (error) {
         console.error('Error:', error.response?.data || error.message);
-        outputText = `Error: ${error.message}`;
-        formattedText = `Error: ${error.message}`;
+        outputFields.error = `Error: ${error.message}`;
     }
 
-    // Step 4: Return Output Using Callback
+    // Step 5: Return Output Using Callback
     callback({
-        outputFields: {
-            rawLineItemText: outputText,  // Raw text output
-            formattedLineItemText: formattedText,  // Formatted output with numbering
-            debugOutput: "Test Output"  // Additional debugging output
-        }
+        outputFields: outputFields
     });
 };
